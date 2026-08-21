@@ -1,0 +1,94 @@
+"""Document endpoints: OCR upload, simplification, and history."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, File, Form, UploadFile
+from starlette.concurrency import run_in_threadpool
+
+from app.models.schemas import (
+    DocumentHistoryRequest,
+    DocumentHistoryResponse,
+    OcrResponse,
+    SimplifyRequest,
+    SimplifyResponse,
+)
+from app.services import agent, ocr, storage
+
+router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+@router.post(
+    "/upload",
+    response_model=OcrResponse,
+    summary="Extract text from a photo of a form",
+)
+async def upload_document(
+    file: UploadFile = File(..., description="Photo of the form (JPG, PNG, WEBP, BMP or TIFF)."),
+    languages: str | None = Form(
+        None,
+        description=(
+            "Optional Tesseract language packs, '+'-joined (e.g. 'eng+kan'). "
+            "Defaults to OCR_LANGUAGES from the server config. Packs that are "
+            "not installed are skipped with a warning rather than failing."
+        ),
+    ),
+) -> OcrResponse:
+    """Step 1 of the Saral flow: read the printed text off the user's document.
+
+    The extracted text is returned as-is; simplification and translation happen
+    in a separate call so the frontend can show progress between the two.
+    """
+    raw = await file.read()
+    ocr.validate_upload(file.filename, file.content_type, len(raw))
+
+    # pytesseract shells out to a binary, so keep it off the event loop.
+    result = await run_in_threadpool(ocr.extract_text, raw, languages)
+
+    return OcrResponse(
+        text=result.text,
+        char_count=result.char_count,
+        word_count=result.word_count,
+        languages_used=result.languages_used,
+        mean_confidence=result.mean_confidence,
+        warnings=result.warnings,
+    )
+
+
+@router.post(
+    "/simplify",
+    response_model=SimplifyResponse,
+    summary="Explain a document in plain language, translated",
+)
+async def simplify_document(payload: SimplifyRequest) -> SimplifyResponse:
+    """Step 2 of the Saral flow: make the document understandable.
+
+    Simplification and translation happen in a single Gemini call, so the user
+    waits once rather than twice and the wording stays consistent.
+    """
+    result = await agent.simplify_and_translate(payload.text, payload.target_language)
+    return SimplifyResponse(**result)
+
+
+@router.post(
+    "/history",
+    response_model=DocumentHistoryResponse,
+    status_code=201,
+    summary="Save a completed document and its answers",
+)
+async def save_history(payload: DocumentHistoryRequest) -> DocumentHistoryResponse:
+    """Final step of the Saral flow: keep a record of what the user filled in.
+
+    Answers are stored in English (translate them with /api/translate first),
+    so a later form can be pre-filled from them without the user having to say
+    their name and address all over again.
+    """
+    record = await run_in_threadpool(
+        storage.save_document,
+        payload.user_id,
+        payload.original_text,
+        payload.simplified_text,
+        payload.title,
+        payload.language,
+        payload.answers,
+    )
+    return DocumentHistoryResponse(**record)

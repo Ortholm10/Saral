@@ -1,0 +1,21 @@
+# Saral backend dependencies
+# Install with:  pip install -r requirements.txt
+
+# --- Web framework ---
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9      # required by FastAPI for multipart/form-data uploads
+pydantic>=2.7.0
+
+# --- Config ---
+python-dotenv>=1.0.1
+
+# --- OCR ---
+pytesseract>=0.3.13          # Python wrapper; needs the Tesseract binary installed separately
+pillow>=10.3.0
+
+# --- Database ---
+supabase>=2.5.0
+
+# --- Language AI ---
+google-generativeai>=0.8.0
