@@ -5,6 +5,7 @@ import Landing from '@/pages/Landing'
 import Login from '@/pages/Login'
 import Signup from '@/pages/Signup'
 import ComingSoon from '@/pages/ComingSoon'
+import HelpChatbot from "./components/HelpChatbot"; // 👇 Add this import
 
 function App() {
   return (
@@ -18,6 +19,10 @@ function App() {
             {/* Onboarding, dashboard, and document screens land here next. */}
             <Route path="*" element={<ComingSoon />} />
           </Routes>
+          
+          {/* 👇 Place the chatbot here so it persists across all routes */}
+          <HelpChatbot />
+          
         </BrowserRouter>
       </AuthProvider>
     </LanguageProvider>

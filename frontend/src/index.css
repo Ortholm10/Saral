@@ -160,4 +160,17 @@
       box-shadow: 0 0 0 14px oklch(from var(--color-primary) l c h / 0);
     }
   }
+
+  /* Running capybara — reusable variant */
+  @keyframes capy-run {
+    0% { transform: translateX(0) rotate(-5deg); }
+    50% { transform: translateX(8px) rotate(5deg); }
+    100% { transform: translateX(0) rotate(-5deg); }
+  }
+
+  /* Gentle pulse for recording state */
+  @keyframes record-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+    50% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); }
+  }
 }
