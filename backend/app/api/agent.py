@@ -1,32 +1,42 @@
-"""Conversational agent endpoint: free-form questions about a document."""
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+from app.services.agent import guide_user
 
-from __future__ import annotations
+router = APIRouter()
 
-from fastapi import APIRouter
+# ── Guide / Navigation Chatbot ────────────────────────────────────────
 
-from app.models.schemas import AskRequest, AskResponse
-from app.services import agent as agent_service
+class GuideRequest(BaseModel):
+    current_screen: str
+    question: str
+    language: str = "en"
+    history: Optional[List[dict]] = None
 
-router = APIRouter(prefix="/api/agent", tags=["agent"])
+class GuideResponse(BaseModel):
+    reply: str
+    suggestions: List[str]
+    navigate_to: Optional[str] = None
 
-
-@router.post(
-    "/ask",
-    response_model=AskResponse,
-    summary="Answer a question about the user's document",
-)
-async def ask(payload: AskRequest) -> AskResponse:
-    """Answer a question about the document, in the user's own language.
-
-    The answer is grounded in the document text only. If the document does not
-    contain the answer, the agent says so rather than inventing one - a wrong
-    confident answer about a government form is worse than no answer.
-
-    Stateless by design: the frontend already holds the document text, so it
-    passes it with each question. That keeps the demo resilient to a page
-    reload mid-conversation.
-    """
-    result = await agent_service.answer_question(
-        payload.document_text, payload.question, payload.language
-    )
-    return AskResponse(**result)
+@router.post("/guide", response_model=GuideResponse)
+async def agent_guide(req: GuideRequest):
+    try:
+        result = await guide_user(
+            current_screen=req.current_screen,
+            user_question=req.question,
+            language=req.language,
+            history=req.history or [],
+        )
+        return GuideResponse(**result)
+    except Exception as e:
+        print(f"🔴 GUIDE ENDPOINT ERROR: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "GUIDE_AGENT_ERROR",
+                    "message": "The guide is having trouble right now.",
+                    "hint": "Please try again in a moment.",
+                }
+            },
+        )

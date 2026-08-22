@@ -13,6 +13,7 @@ import DocumentReader from '@/pages/DocumentReader'
 import VoiceAnswer from '@/pages/VoiceAnswer'
 import Confirmation from '@/pages/Confirmation'
 import ComingSoon from '@/pages/ComingSoon'
+import HelpChatbot from '@/components/HelpChatbot'
 
 function App() {
   return (
@@ -39,6 +40,9 @@ function App() {
               {/* Onboarding, dashboard, and settings screens land here next. */}
               <Route path="*" element={<ComingSoon />} />
             </Routes>
+
+            {/* Persists across every route so help is always one tap away. */}
+            <HelpChatbot />
           </BrowserRouter>
         </AuthProvider>
       </PreferencesProvider>

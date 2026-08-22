@@ -67,7 +67,7 @@ register_exception_handlers(app)
 
 app.include_router(documents.router)
 app.include_router(translate.router)
-app.include_router(agent_api.router)
+app.include_router(agent_api.router, prefix="/api/agent")
 app.include_router(profile.router)
 
 
