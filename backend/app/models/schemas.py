@@ -77,9 +77,88 @@ class SimplifyResponse(BaseModel):
     simplified_text: str = Field(
         ..., description="Plain-language explanation in the target language. No markdown."
     )
+    original_lines: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The document split into lines. Always the same length as translated_lines, "
+            "with entry i describing the same content in both. A length of 1 means the "
+            "two could not be lined up - show one block, not a line-by-line view."
+        ),
+    )
+    translated_lines: list[str] = Field(
+        default_factory=list,
+        description="The explanation split to match original_lines, line for line.",
+    )
     language: str = Field(..., description="Resolved language name, e.g. 'Kannada'.")
     language_code: str = Field(..., description="Resolved ISO code, e.g. 'kn'.")
     model: str | None = Field(None, description="Gemini model that produced this.")
+
+
+class ExtractFieldsRequest(BaseModel):
+    """Ask which questions a person filling in this form has to answer."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Document text to read fields out of, normally from /api/documents/upload.",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text": (
+                    "APPLICATION FOR NEW RATION CARD\n"
+                    "1. Name of head of family:\n"
+                    "2. Date of birth:\n"
+                    "3. Annual household income (Rs.):"
+                )
+            }
+        }
+    }
+
+
+class ExtractedField(BaseModel):
+    """One question the Voice Answer screen will ask out loud."""
+
+    field_name: str = Field(
+        ...,
+        description="The question in plain language, e.g. 'What is your date of birth?'.",
+    )
+    field_type: str = Field(
+        ...,
+        description="One of 'text', 'date', 'number', 'address', 'name'.",
+    )
+
+
+class ExtractFieldsResponse(BaseModel):
+    """The fields found, in the order they appear on the form.
+
+    An empty list is a successful response, not an error - it is the frontend's
+    cue to fall back to the open-ended flow.
+    """
+
+    fields: list[ExtractedField] = Field(
+        default_factory=list,
+        description="Fields to walk the user through. Empty means none could be identified.",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "fields": [
+                    {
+                        "field_name": "What is the name of the head of your family?",
+                        "field_type": "name",
+                    },
+                    {"field_name": "What is your date of birth?", "field_type": "date"},
+                    {
+                        "field_name": "What is your annual household income in rupees?",
+                        "field_type": "number",
+                    },
+                ]
+            }
+        }
+    }
 
 
 class TranslateRequest(BaseModel):

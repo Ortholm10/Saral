@@ -11,9 +11,11 @@ browser via the Web Speech API.
 
 1. User photographs a form -> `POST /api/documents/upload` returns the raw text.
 2. That text is simplified **and** translated in one Gemini call -> `POST /api/documents/simplify`.
-3. The user asks free-form questions about the document -> `POST /api/agent/ask`.
-4. Spoken answers are translated back to English for storage -> `POST /api/translate`.
-5. The finished form is saved -> `POST /api/documents/history`.
+3. The form is broken into the questions it actually asks -> `POST /api/documents/extract-fields`,
+   so the Voice Answer screen can walk the user through it one question at a time.
+4. The user asks free-form questions about the document -> `POST /api/agent/ask`.
+5. Spoken answers are translated back to English for storage -> `POST /api/translate`.
+6. The finished form is saved -> `POST /api/documents/history`.
 
 ## Prerequisites
 
@@ -103,15 +105,16 @@ in one request.
 
 ## Endpoints
 
-| Method | Path | Purpose | Needs |
-| --- | --- | --- | --- |
-| GET | `/api/health` | Dependency status | - |
-| POST | `/api/documents/upload` | Photo -> extracted text (OCR) | Tesseract |
-| POST | `/api/documents/simplify` | Text -> simplified + translated | Gemini |
-| POST | `/api/translate` | Pure translation | Gemini |
-| POST | `/api/agent/ask` | Free-form Q&A about a document | Gemini |
-| GET/POST | `/api/profile` | Language + accessibility preferences | Supabase |
-| POST | `/api/documents/history` | Save a processed document | Supabase |
+| Method | Path | Purpose | Needs | Status |
+| --- | --- | --- | --- | --- |
+| GET | `/api/health` | Dependency status | - | Done |
+| POST | `/api/documents/upload` | Photo -> extracted text (OCR) | Tesseract | Done |
+| POST | `/api/documents/simplify` | Text -> simplified + translated | Gemini | Done |
+| POST | `/api/documents/extract-fields` | Text -> the questions the form asks | Gemini | Done |
+| POST | `/api/translate` | Pure translation | Gemini | Done |
+| POST | `/api/agent/ask` | Free-form Q&A about a document | Gemini | Done |
+| GET/POST | `/api/profile` | Language + accessibility preferences | Supabase | Done |
+| POST | `/api/documents/history` | Save a processed document | Supabase | Done |
 
 ### `POST /api/documents/upload`
 
@@ -152,8 +155,77 @@ plus `language`, `language_code` and `model`. Simplification and translation
 happen in one Gemini call, so the user waits once and the wording stays
 consistent.
 
+It also returns the same explanation split for a side-by-side view:
+
+```json
+{
+  "simplified_text": "...",
+  "original_lines": ["APPLICATION FOR NEW RATION CARD", "1. Name of head of family:"],
+  "translated_lines": ["ಇದು ಹೊಸ ರೇಷನ್ ಕಾರ್ಡ್ ...", "ಇಲ್ಲಿ ನಿಮ್ಮ ಕುಟುಂಬದ ..."]
+}
+```
+
+`original_lines` and `translated_lines` are always the same length, and entry
+`i` of each describes the same piece of content, so the two can be shown line
+against line. Blank lines are dropped from both sides - OCR sprinkles them
+unpredictably and Gemini will not reproduce them.
+
+**A length of 1 means the lines could not be matched up.** Gemini merged two
+lines, split one, or added a remark of its own, and there is no honest way to
+say which line pairs with which - guessing would put the wrong translation
+beside the wrong original. Both arrays then hold the whole text as a single
+element, which is the frontend's cue to show one side-by-side block instead of
+a line-by-line view. A one-line document lands here too, which is the right
+outcome for it.
+
+`simplified_text` is unchanged and still carries the full explanation, so a
+caller that ignores the two new arrays keeps working exactly as before.
+
 `target_language` accepts a name or an ISO code: `Kannada`, `kn`, `Hindi`,
 `hi`, and so on. An unlisted language is passed through to Gemini as written.
+
+### `POST /api/documents/extract-fields`
+
+```json
+{ "text": "APPLICATION FOR NEW RATION CARD\n1. Name of head of family:\n2. Date of birth:" }
+```
+
+Returns the questions this form actually asks, in the order they appear:
+
+```json
+{
+  "fields": [
+    { "field_name": "What is the name of the head of your family?", "field_type": "name" },
+    { "field_name": "What is your date of birth?", "field_type": "date" }
+  ]
+}
+```
+
+This is what lets the Voice Answer screen walk the user through a form one
+question at a time instead of reading one long blob at them.
+
+Only blanks the person has to fill in themselves come back. Titles, section
+headings, instructions, penalty warnings, signature boxes and anything already
+printed on the form (the office address, a reference number the office assigns)
+are all left out. Each field is phrased as a spoken question rather than copied
+as a raw label, so the frontend can read it straight out: `DOB:` comes back as
+"What is your date of birth?".
+
+`field_type` is one of `text`, `date`, `number`, `address`, `name`, chosen as
+the closest match. Anything unrecognised is reported as `text`, which the
+frontend can always prompt for.
+
+**An empty `fields` array is a successful `200`, not an error.** It means no
+fillable field could be identified - a public notice, a scrap of text, a scan
+too garbled to read - and it is the frontend's cue to fall back to the
+open-ended flow. Anything unusable from Gemini degrades to `[]` the same way,
+because failing loudly here would take away a fallback the user could otherwise
+have had. Genuine failures (Gemini unreachable, rate-limited, or not
+configured) still return the normal error shape.
+
+Field names come back in English. Run them through `/api/translate` to speak
+them in the user's language, which also keeps stored answers in English for
+`/api/documents/history`.
 
 ### `POST /api/translate`
 

@@ -1,4 +1,4 @@
-"""Document endpoints: OCR upload, simplification, and history."""
+"""Document endpoints: OCR upload, simplification, field extraction, and history."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from starlette.concurrency import run_in_threadpool
 from app.models.schemas import (
     DocumentHistoryRequest,
     DocumentHistoryResponse,
+    ExtractFieldsRequest,
+    ExtractFieldsResponse,
     OcrResponse,
     SimplifyRequest,
     SimplifyResponse,
@@ -67,6 +69,27 @@ async def simplify_document(payload: SimplifyRequest) -> SimplifyResponse:
     """
     result = await agent.simplify_and_translate(payload.text, payload.target_language)
     return SimplifyResponse(**result)
+
+
+@router.post(
+    "/extract-fields",
+    response_model=ExtractFieldsResponse,
+    summary="List the questions this form asks the user to answer",
+)
+async def extract_document_fields(payload: ExtractFieldsRequest) -> ExtractFieldsResponse:
+    """Turn a form into questions the Voice Answer screen asks one at a time.
+
+    Only the blanks the person has to fill in themselves come back - titles,
+    instructions and anything already printed on the form are left out. Each
+    field is phrased as a spoken question, so the frontend can read it straight
+    out ("What is your date of birth?" rather than "DOB:").
+
+    An empty `fields` array is a successful response, not an error. It means no
+    fillable field could be identified, and it is the frontend's cue to fall
+    back to the open-ended flow rather than show the user a failure.
+    """
+    fields = await agent.extract_fields(payload.text)
+    return ExtractFieldsResponse(fields=fields)
 
 
 @router.post(

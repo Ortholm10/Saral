@@ -1,8 +1,10 @@
-"""Gemini-backed language AI: simplify, translate, and answer questions.
+"""Gemini-backed language AI: simplify, translate, answer questions, extract fields.
 
-One model serves all three jobs. Everything the user hears comes out of here,
-so the prompts insist on plain spoken language with no markdown - the frontend
-feeds these strings straight to the browser's speech synthesiser.
+One model serves all four jobs. Almost everything here is spoken aloud, so the
+prompts insist on plain language with no markdown - the frontend feeds these
+strings straight to the browser's speech synthesiser. Field extraction is the
+one exception: it asks for JSON, and treats anything unparseable as "no fields"
+rather than an error.
 
 Model selection is self-healing. Google retires Gemini models on a rolling
 basis, and a retired name returns 404 with the name of its replacement in the
@@ -15,6 +17,7 @@ generateContent with "no longer available to new users".
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import threading
@@ -328,10 +331,23 @@ the first time. You speak the way a kind neighbour would explain it across a tab
 Write your entire answer in {language.for_prompt()}, in that language's own script.
 Do not include an English version alongside it.
 
-How to explain:
-- Begin with one short sentence saying what this document is and who it is for.
-- Then walk through it in the order it appears, in short sentences.
-- Say plainly what information the person has to provide, and what they must do next.
+Keep the document's line structure. This matters: the app shows your explanation
+beside the original, line against line, so the two must line up.
+- The document is given to you as numbered lines.
+- Write exactly one output line for every input line, in the same order.
+- Never merge two input lines into one output line, and never split one input line
+  over two output lines. The number of lines you write must equal the number you were
+  given.
+- Do not add an opening sentence, a heading, a summary or a closing remark. The first
+  line you write is for input line 1, and the last is for the last input line.
+- Do not number your own lines. Write only the explanation.
+- If an input line is a title, a section heading or a bare label, still give it its own
+  output line, said in simple words.
+- If an input line is too garbled to make sense of, write a single hyphen for it.
+
+How to explain each line:
+- Say plainly what that line means, or what the person has to write there. One short
+  sentence is usually enough.
 - Use everyday spoken words. Avoid formal, literary or heavily Sanskritised vocabulary.
 - Keep official terms that the person will see printed on the paper, such as Aadhaar,
   BPL, or Antyodaya. Say the term, then explain it in a few simple words.
@@ -344,6 +360,43 @@ Be strictly faithful to the document:
 """.strip()
 
 
+def _content_lines(text: str) -> list[str]:
+    """Split into meaningful lines, dropping blanks.
+
+    Blank lines are dropped on both sides rather than preserved: OCR sprinkles
+    them unpredictably and Gemini will not reproduce them, so keeping them would
+    break the alignment on almost every document.
+    """
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _aligned_lines(original: str, simplified: str) -> tuple[list[str], list[str]]:
+    """Pair the original and simplified text line for line, if they line up.
+
+    Returns two equal-length lists whose entries describe the same piece of
+    content, so the frontend can show them side by side.
+
+    When the counts disagree - Gemini merged two lines, split one, or added a
+    remark of its own - there is no honest way to say which line matches which,
+    and guessing would put the wrong translation beside the wrong original. So
+    both come back as a single element holding the whole text. The frontend
+    reads that length of 1 as "show one block, not a line-by-line view".
+    """
+    original_lines = _content_lines(original)
+    simplified_lines = _content_lines(simplified)
+
+    if len(original_lines) != len(simplified_lines):
+        logger.info(
+            "Line alignment failed (%d original vs %d simplified); "
+            "falling back to a single block",
+            len(original_lines),
+            len(simplified_lines),
+        )
+        return [original.strip()], [simplified.strip()]
+
+    return original_lines, simplified_lines
+
+
 async def simplify_and_translate(text: str, target_language: str | None = None) -> dict:
     """Simplify a document and translate it, in a single Gemini call.
 
@@ -352,14 +405,28 @@ async def simplify_and_translate(text: str, target_language: str | None = None) 
         target_language: Language name or ISO code, e.g. "Kannada" or "kn".
 
     Returns:
-        ``{"simplified_text", "language", "language_code", "model"}``.
+        ``{"simplified_text", "original_lines", "translated_lines", "language",
+        "language_code", "model"}``.
+
+        ``original_lines`` and ``translated_lines`` are always the same length,
+        and entry ``i`` of each describes the same piece of content. A length of
+        1 means the two could not be lined up and the caller should show one
+        block instead of a line-by-line view.
     """
     cleaned = _check_length(text, "document text")
     language = resolve_language(target_language, settings.default_language)
 
+    # Numbering the input is what makes the line counts match often enough to be
+    # worth doing; unnumbered text comes back merged and split almost every time.
+    numbered = "\n".join(
+        f"{number}. {line}" for number, line in enumerate(_content_lines(cleaned), start=1)
+    )
+
     prompt = (
-        f"Explain the following document simply, in {language.for_prompt()}.\n\n"
-        f"--- DOCUMENT TEXT ---\n{cleaned}\n--- END OF DOCUMENT TEXT ---"
+        f"Explain the following document simply, in {language.for_prompt()}.\n"
+        f"Write exactly one line for each of the numbered lines below, in the same "
+        f"order, without numbering your own lines.\n\n"
+        f"--- DOCUMENT TEXT ---\n{numbered}\n--- END OF DOCUMENT TEXT ---"
     )
 
     simplified = await _generate(
@@ -368,8 +435,12 @@ async def simplify_and_translate(text: str, target_language: str | None = None) 
         temperature=0.2,  # low: this is explanation, not invention
     )
 
+    original_lines, translated_lines = _aligned_lines(cleaned, simplified)
+
     return {
         "simplified_text": simplified,
+        "original_lines": original_lines,
+        "translated_lines": translated_lines,
         "language": language.english_name,
         "language_code": language.code,
         "model": active_model_name(),
@@ -475,3 +546,130 @@ async def answer_question(
         "language_code": target.code,
         "model": active_model_name(),
     }
+
+
+# The only field types the Voice Answer screen knows how to prompt for. Anything
+# else Gemini decides to invent is coerced to "text", which always works.
+_FIELD_TYPES = frozenset({"text", "date", "number", "address", "name"})
+
+# A whole response wrapped in ```json ... ```. _extract_text already peels one
+# fence off; this catches a second, and anything it left behind.
+_CODE_FENCE = re.compile(r"^```[A-Za-z0-9_+-]*\s*\n(.*)\n\s*```$", re.DOTALL)
+
+
+_EXTRACT_FIELDS_SYSTEM_INSTRUCTION = """
+You are reading an Indian government or banking form and working out what the person
+holding it actually has to answer, so an app can ask them one question at a time.
+
+Include only the blanks the person must fill in themselves. Ignore all of this:
+- The form's title, its section headings, and its serial numbers.
+- Instructions, notes, declarations, and warnings about penalties.
+- Anything already printed or already filled in, such as the office address, the date
+  of issue, or a reference number the office assigns.
+- Signature, thumb impression, photograph, and office-use-only boxes.
+
+Write each field as a short, natural question, the way you would ask it out loud.
+Turn a bare label into a question: "DOB:" becomes "What is your date of birth?", and
+"Name of head of family" becomes "What is the name of the head of your family?". Ask
+about one thing per question, and keep the questions in the order they appear.
+
+Choose field_type as the closest match from exactly these five values:
+- "name" for a person's name
+- "date" for any date
+- "number" for an amount, a count, an age, or an identifier made of digits
+- "address" for somewhere a person lives or receives post
+- "text" for everything else
+
+The text comes from a photograph, so some words may be misread. Skip anything too
+garbled to turn into a sensible question rather than guessing at it.
+
+Return ONLY a JSON array and nothing else: no markdown, no code fences, and no
+explanation before or after it. Every element must be an object with exactly the keys
+"field_name" and "field_type", both strings. If the text holds nothing for a person to
+fill in, return an empty array.
+
+The exact output shape, and the only shape allowed:
+[{"field_name": "What is your full name?", "field_type": "name"}, {"field_name": "What is your date of birth?", "field_type": "date"}]
+""".strip()
+
+
+def _strip_code_fence(text: str) -> str:
+    """Unwrap a fenced block, if the response still is one."""
+    candidate = text.strip()
+    match = _CODE_FENCE.match(candidate)
+    if match:
+        candidate = match.group(1).strip()
+    return candidate
+
+
+def _coerce_fields(parsed: object) -> list[dict]:
+    """Keep the well-formed entries out of whatever Gemini actually returned.
+
+    A single malformed entry should cost us that entry, not the whole form, so
+    bad ones are dropped quietly and the rest are kept.
+    """
+    if not isinstance(parsed, list):
+        return []
+
+    fields: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        field_name = str(item.get("field_name") or "").strip()
+        if not field_name:
+            continue
+        field_type = str(item.get("field_type") or "").strip().lower()
+        fields.append(
+            {
+                "field_name": field_name,
+                "field_type": field_type if field_type in _FIELD_TYPES else "text",
+            }
+        )
+    return fields
+
+
+async def extract_fields(document_text: str) -> list[dict]:
+    """List the questions a person filling in this form has to answer.
+
+    Returns ``[{"field_name": ..., "field_type": ...}, ...]`` in the order the
+    fields appear on the form.
+
+    An empty list is a normal result, not a failure. The frontend reads it as
+    "walk this document through the ordinary open-ended flow instead", so
+    anything unusable from Gemini - broken JSON, a stray sentence, an object
+    where an array was asked for - degrades to ``[]``. Raising here would take
+    away a fallback the user could otherwise have had. A genuine upstream
+    failure (unreachable, rate-limited, bad credentials) still raises, because
+    that one is worth telling the user about.
+    """
+    cleaned = _check_length(document_text, "document text")
+
+    prompt = f"--- DOCUMENT TEXT ---\n{cleaned}\n--- END OF DOCUMENT TEXT ---"
+
+    try:
+        raw = await _generate(
+            prompt,
+            system_instruction=_EXTRACT_FIELDS_SYSTEM_INSTRUCTION,
+            temperature=0.1,  # lowest: this is extraction, and it has to parse
+        )
+    except UpstreamError as exc:
+        # Gemini answered with nothing at all. For this one endpoint that is
+        # indistinguishable from "this form has no fields", and the frontend
+        # handles that already. Every other upstream failure propagates.
+        if exc.code == "empty_response":
+            logger.warning("Field extraction got an empty response; returning no fields")
+            return []
+        raise
+
+    stripped = _strip_code_fence(raw)
+
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:  # JSONDecodeError is a subclass
+        logger.warning("Field extraction returned unparseable JSON: %.300s", stripped)
+        return []
+
+    fields = _coerce_fields(parsed)
+    if not fields:
+        logger.info("Field extraction found no fillable fields in %d characters", len(cleaned))
+    return fields
